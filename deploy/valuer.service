@@ -1,0 +1,18 @@
+[Unit]
+Description=Valuer Support API and interface
+After=network.target
+
+[Service]
+User=valuer
+Group=valuer
+WorkingDirectory=/opt/valuer/backend
+Environment=HOME=/var/lib/valuer
+ExecStart=/opt/valuer/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
