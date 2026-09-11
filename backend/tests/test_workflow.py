@@ -67,7 +67,7 @@ def test_word_export_and_map_gate(client, auth):
         xml=z.read('word/document.xml').decode()
         assert 'A &amp; B &lt;Owner&gt;' in xml
         assert '{{' not in xml and '{%' not in xml
-        assert 'DRAFT' in xml and '800,000.00' in xml
+        assert 'DRAFT' in xml and '800,000/-' in xml
     raw['property'].update(latitude=0,longitude=0,include_map=True)
     client.put(url,headers=auth,json={'revision':2,'data':raw})
     assert client.get(url+'/export/docx',headers=auth).status_code==409

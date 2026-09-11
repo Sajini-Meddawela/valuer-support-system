@@ -1,4 +1,10 @@
 from io import BytesIO
+from copy import deepcopy
+import re
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
+from docx.text.run import Run
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import hashlib
@@ -17,8 +23,9 @@ from .config import settings
 from .calculations import calculate, money, words
 from .maps import map_image
 from .schemas import ReportData
+from .reference_layout import layout_context, longdate, shortdate
 
-TEMPLATE = Path(__file__).resolve().parents[1] / 'templates' / 'valuation-v1.docx'
+TEMPLATE = Path(__file__).resolve().parents[1] / 'templates' / 'valuation-reference-v2.docx'
 
 
 def asset_image(doc, path, max_width=155, max_height=90):
@@ -30,13 +37,15 @@ def asset_image(doc, path, max_width=155, max_height=90):
 
 def docx_bytes(data: ReportData, status: str, assets):
     if not TEMPLATE.exists():
-        raise HTTPException(503, 'Report template is missing. Run python scripts/create_template.py.')
+        raise HTTPException(503, 'Report template is missing. Restore backend/templates/valuation-reference-v2.docx from the template update package.')
     doc = DocxTemplate(str(TEMPLATE))
     ctx = data.model_dump(mode='json')
     ctx['status'] = 'FINAL — APPROVED BY VALUER' if status == 'final' else 'DRAFT — NOT APPROVED'
     ctx['calc'] = calculate(data)
-    ctx['template_version'] = 'valuation-v1 / ' + hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()[:12]
-    ctx['map_image'] = ''
+    ctx['template_version'] = 'valuation-reference-v2 / ' + hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()[:12]
+    ctx.update(layout_context(data, ctx['calc']))
+    ctx['is_final'] = status == 'final'
+    ctx['map_image'] = 'Map not included.'
     ctx['map_note'] = 'Map not included.'
     ctx['qr_image'] = ''
     buffers = []
@@ -44,21 +53,61 @@ def docx_bytes(data: ReportData, status: str, assets):
         if not settings.map_report_export_allowed:
             raise HTTPException(409, 'Map export is disabled until the operator confirms export and retention rights. Disable Include map to export without it.')
         content = BytesIO(map_image(data.property)); buffers.append(content)
-        ctx['map_image'] = InlineImage(doc, content, width=Mm(155))
+        ctx['map_image'] = InlineImage(doc, content, width=Mm(158))
         ctx['map_note'] = ('Location map — not a survey plan; imagery is not live. Retrieved ' +
                            datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC') +
                            ('. Blue access path supplied by the valuer.' if data.property.access_path else '.'))
     if data.property.latitude is not None:
         url = 'https://www.google.com/maps/search/?' + urlencode({'api': 1, 'query': f'{data.property.latitude},{data.property.longitude}'})
         buf = BytesIO(); qrcode.make(url).save(buf, format='PNG'); buf.seek(0); buffers.append(buf)
-        ctx['qr_image'] = InlineImage(doc, buf, width=Mm(27))
+        ctx['qr_image'] = InlineImage(doc, buf, width=Mm(43))
     ctx['photos'] = [{'caption': x.caption, 'image': asset_image(doc, settings.data_dir / 'photos' / x.filename)} for x in assets]
+    roles = {'cover': [], 'access': [], 'interior': []}
+    for asset in assets:
+        role = 'interior'
+        caption = asset.caption or ''
+        for candidate in roles:
+            if caption.lower().startswith('[' + candidate + ']'):
+                role = candidate
+                break
+        roles[role].append(asset)
+    ctx['cover_image'] = asset_image(doc, settings.data_dir / 'photos' / roles['cover'][0].filename, 134, 100) if roles['cover'] else 'Cover photograph not supplied.'
+    ctx['access_image'] = asset_image(doc, settings.data_dir / 'photos' / roles['access'][0].filename, 71, 43) if roles['access'] else ''
+    ctx['interior_left'] = asset_image(doc, settings.data_dir / 'photos' / roles['interior'][0].filename, 58, 44) if roles['interior'] else ''
+    ctx['interior_right'] = asset_image(doc, settings.data_dir / 'photos' / roles['interior'][1].filename, 58, 44) if len(roles['interior']) > 1 else ''
+    extra = roles['cover'][1:] + roles['access'][1:] + (roles['interior'][2:] if data.property.kind == 'land_building' else roles['interior'])
+    ctx['extra_photos'] = [{'image': asset_image(doc, settings.data_dir / 'photos' / x.filename),
+                            'caption': x.caption.split(']', 1)[-1].strip() if x.caption.startswith('[') else x.caption} for x in extra]
     env = Environment(undefined=StrictUndefined, autoescape=True)
+    env.filters['longdate'] = longdate
+    env.filters['shortdate'] = shortdate
     env.filters['money'] = money
     env.filters['words'] = words
     env.filters['blank'] = lambda v: v if v not in ('', None) else 'Not supplied'
     doc.render(ctx, jinja_env=env, autoescape=True)
-    result = BytesIO(); doc.save(result)
+    rendered = doc.docx
+    for node in rendered.element.xpath('.//w:p'):
+        para = Paragraph(node, rendered)
+        for run in list(para.runs):
+            if not re.search(r'\d(?:st|nd|rd|th) [A-Z][a-z]+ \d{4}', run.text):
+                continue
+            chunks = re.split(r'(?<=\d)(st|nd|rd|th)(?= [A-Z][a-z]+ \d{4})', run.text)
+            for i, chunk in enumerate(chunks):
+                replacement = OxmlElement('w:r')
+                if run._r.rPr is not None: replacement.append(deepcopy(run._r.rPr))
+                item = Run(replacement, para); item.text = chunk
+                if i % 2: item.font.superscript = True
+                run._r.addprevious(replacement)
+            run._r.getparent().remove(run._r)
+    if roles['cover']:
+        for para in rendered.paragraphs:
+            if para._p.xpath('.//wp:inline'):
+                for shape in para._p.xpath('.//pic:spPr'):
+                    line=OxmlElement('a:ln');line.set('w','25400')
+                    fill=OxmlElement('a:solidFill');color=OxmlElement('a:srgbClr');color.set('val','000000')
+                    fill.append(color);line.append(fill);shape.append(line)
+                break
+    result = BytesIO(); rendered.save(result)
     return result.getvalue()
 
 

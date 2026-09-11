@@ -25,6 +25,7 @@ class Credentials(Strict):
 
 
 class Valuer(Strict):
+    signature_designation: str = ''
     name: str = ''
     qualifications: str = ''
     registration: str = ''
@@ -41,6 +42,8 @@ class BankData(Strict):
 
 
 class Assignment(Strict):
+    display_addressee: str = ''
+    display_address: str = ''
     reference: str = ''
     bank_reference: str = ''
     request_date: date | None = None
@@ -55,6 +58,8 @@ class Assignment(Strict):
 
 
 class Property(Strict):
+    boundary_note: str = ''
+    assessment_text: str = ''
     kind: Literal['land', 'land_building'] = 'land'
     address: str = ''
     land_name: str = ''
@@ -107,6 +112,7 @@ class Floor(Strict):
 
 
 class Building(Strict):
+    short_name: str = ''
     description: str = ''
     area_source: str = ''
     roof: str = ''
@@ -120,6 +126,7 @@ class Building(Strict):
 
 
 class Findings(Strict):
+    deed_type: str = ''
     documents: str = ''
     approvals: str = ''
     street_building_lines: str = ''

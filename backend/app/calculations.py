@@ -81,6 +81,8 @@ def review_issues(data: ReportData):
             issues.append(f'Explain the {name.replace("_", " ")} value.')
     if a.inspection_date and a.report_date and a.inspection_date > a.report_date:
         issues.append('Inspection date cannot be after the report date.')
+    if a.valuation_date and a.report_date and a.valuation_date > a.report_date:
+        issues.append('Valuation date cannot be after the report date.')
     try:
         calculate(data)
     except ValueError as exc:
