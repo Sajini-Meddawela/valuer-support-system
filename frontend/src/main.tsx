@@ -115,6 +115,7 @@ function App() {
     [file, setFile] = useState<File | null>(null),
     [search, setSearch] = useState("");
   const [pathText, setPathText] = useState("");
+  const [draftToDelete, setDraftToDelete] = useState<Report | null>(null);
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
     setError("");
@@ -214,6 +215,12 @@ function App() {
     const blob = await api(`/reports/${r.id}/export/${kind}`);
     if (preview) setPdfUrl(URL.createObjectURL(blob));
     else download(blob, `valuation-${r.id.slice(0, 8)}-${r.status}.${kind}`);
+  };
+  const deleteDraft = async (r: Report) => {
+    await api(`/reports/${r.id}?revision=${r.revision}`, "DELETE");
+    setReports((current) => current.filter((item) => item.id !== r.id));
+    setDraftToDelete(null);
+    setMessage("Draft deleted. Files already downloaded to your device are unchanged.");
   };
   const locked = report?.status === "final";
   const section = groups.find((g) => g.key === tab);
@@ -430,32 +437,51 @@ function App() {
                   .includes(search.toLowerCase()),
               )
               .map((r) => (
-                <button
-                  className="report-row"
-                  key={r.id}
-                  onClick={() =>
-                    run(async () => open(await api(`/reports/${r.id}`)))
-                  }
-                >
-                  <div>
-                    <strong>
-                      {r.data.assignment.reference || "Untitled assignment"}
-                    </strong>
-                    <p>
-                      {r.data.property.address ||
-                        "Property details not entered"}
-                    </p>
-                    <small>
-                      {r.data.assignment.owner || "Owner not entered"}
-                    </small>
-                  </div>
-                  <div>
-                    <span className={"badge " + r.status}>{r.status}</span>
-                    <p className="muted">
-                      {new Date(r.updated_at).toLocaleDateString()}
-                    </p>
-                  </div>
-                </button>
+                <div className="report-row" key={r.id}>
+                  <button
+                    className="report-open"
+                    disabled={busy}
+                    onClick={() =>
+                      run(async () => open(await api(`/reports/${r.id}`)))
+                    }
+                  >
+                    <div>
+                      <strong>
+                        {r.data.assignment.reference || "Untitled assignment"}
+                      </strong>
+                      <p>
+                        {r.data.property.address ||
+                          "Property details not entered"}
+                      </p>
+                      <small>
+                        {r.data.assignment.owner || "Owner not entered"}
+                      </small>
+                    </div>
+                    <div className="report-meta">
+                      <span className={"badge " + r.status}>{r.status}</span>
+                      <p className="muted">
+                        {new Date(r.updated_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                  </button>
+                  {r.status === "draft" && (
+                    <button
+                      className="delete-draft"
+                      disabled={busy}
+                      aria-label={`Delete draft ${r.data.assignment.reference || "Untitled assignment"}`}
+                      title="Delete draft"
+                      onClick={() => setDraftToDelete(r)}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        aria-hidden="true"
+                        focusable="false"
+                      >
+                        <path d="M9 3h6l1 2h4v2H4V5h4l1-2Zm-2 6h10l-.7 11H7.7L7 9Zm3 2v7h2v-7h-2Zm4 0v7h2v-7h-2Z" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
               ))}
             {reports.length === 0 && (
               <div className="empty">
@@ -464,6 +490,61 @@ function App() {
               </div>
             )}
           </div>
+          {draftToDelete && (
+            <div
+              className="modal-backdrop"
+              role="presentation"
+              onMouseDown={(e) => {
+                if (e.target === e.currentTarget && !busy) setDraftToDelete(null);
+              }}
+            >
+              <div
+                className="confirm-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="delete-draft-title"
+                aria-describedby="delete-draft-description"
+              >
+                <div className="confirm-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <path d="M9 3h6l1 2h4v2H4V5h4l1-2Zm-2 6h10l-.7 11H7.7L7 9Zm3 2v7h2v-7h-2Zm4 0v7h2v-7h-2Z" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 id="delete-draft-title">Delete this draft?</h2>
+                  <p id="delete-draft-description">
+                    <strong>
+                      {draftToDelete.data.assignment.reference ||
+                        "Untitled assignment"}
+                    </strong>{" "}
+                    will be permanently removed from this system, including its
+                    version history and photos used only by this draft.
+                  </p>
+                  <p className="muted">
+                    PDF or Word files you already downloaded are not affected.
+                  </p>
+                </div>
+                <div className="confirm-actions">
+                  <button
+                    autoFocus
+                    disabled={busy}
+                    onClick={() => setDraftToDelete(null)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="danger"
+                    disabled={busy}
+                    onClick={() =>
+                      run(async () => deleteDraft(draftToDelete))
+                    }
+                  >
+                    {busy ? "Deleting…" : "Delete draft"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </main>
       ) : (
         <>

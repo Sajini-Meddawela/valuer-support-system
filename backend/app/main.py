@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from PIL import Image, ImageOps, UnidentifiedImageError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
@@ -22,7 +22,7 @@ from .reporting import docx_bytes, pdf_bytes, archive
 
 @asynccontextmanager
 async def lifespan(app):
-    Base.metadata.create_all(engine)  # Initial schema only; see migration guidance before changing it.
+    Base.metadata.create_all(engine) 
     yield
 
 
@@ -162,6 +162,32 @@ def new_report(user: User = Depends(current_user), db: Session = Depends(get_db)
 @app.get('/api/reports/{report_id}')
 def get_report(report_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     return result(owned(db, report_id, user))
+
+
+@app.delete('/api/reports/{report_id}', status_code=204)
+def delete_report(report_id: str, revision: int,
+                  user: User = Depends(current_user), db: Session = Depends(get_db)):
+    report = owned(db, report_id, user)
+    if report.status != 'draft':
+        raise HTTPException(409, 'Only draft reports can be deleted. Final or review reports must be kept.')
+    if report.revision != revision:
+        raise HTTPException(409, 'This report changed. Reload before deleting it.')
+
+    filenames = [asset.filename for asset in assets_for(db, report_id)]
+    db.execute(delete(Event).where(Event.report_id == report_id))
+    db.execute(delete(Asset).where(Asset.report_id == report_id))
+    db.delete(report)
+    db.commit()
+
+    photo_folder = settings.data_dir / 'photos'
+    for filename in set(filenames):
+        still_referenced = db.scalar(select(Asset.id).where(Asset.filename == filename).limit(1))
+        if not still_referenced:
+            try:
+                (photo_folder / filename).unlink(missing_ok=True)
+            except OSError:
+                pass
+    return Response(status_code=204)
 
 
 @app.put('/api/reports/{report_id}')
@@ -333,9 +359,6 @@ def export(report_id: str, kind: str, user: User = Depends(current_user), db: Se
         raw = pdf_bytes(raw)
     return Response(raw, media_type=media, headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
-
-# Register after API routes. Build the frontend before starting this process.
-# The frontend uses one page and does not need a client-side routing fallback.
 from fastapi.staticfiles import StaticFiles
 frontend_dist = Path(__file__).resolve().parents[2] / 'frontend' / 'dist'
 if (frontend_dist / 'index.html').is_file():
