@@ -62,9 +62,39 @@ class Event(Base):
     snapshot: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[str] = mapped_column(String(50), default=now)
 
+class DriveConnection(Base):
+    __tablename__ = 'drive_connections'
 
-engine = create_engine(settings.database_url, connect_args={'check_same_thread': False}
-                       if settings.database_url.startswith('sqlite') else {}, pool_pre_ping=True)
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey('users.id'),
+        primary_key=True
+    )
+
+    encrypted_refresh_token: Mapped[str] = mapped_column(Text)
+
+    root_folder_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True
+    )
+
+
+database_url = settings.database_url
+
+if database_url.startswith("postgresql://"):
+    database_url = database_url.replace(
+        "postgresql://",
+        "postgresql+psycopg://",
+        1,
+    )
+
+engine = create_engine(
+    database_url,
+    connect_args={
+        "check_same_thread": False
+    } if database_url.startswith("sqlite") else {},
+    pool_pre_ping=True,
+)
+
 Session = sessionmaker(engine, expire_on_commit=False)
 
 

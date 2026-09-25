@@ -4,14 +4,26 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', extra='ignore')
+
     database_url: str = 'sqlite:///./data/valuer.db'
     jwt_secret: str
     data_dir: Path = Path('data')
+
     allow_registration: bool = True
-    cors_origins: list[str] = ['http://localhost:5173', 'http://127.0.0.1:5173']
+    cors_origins: list[str] = [
+        'http://localhost:5173',
+        'http://127.0.0.1:5173'
+    ]
+
     google_maps_api_key: str = ''
     google_maps_signing_secret: str = ''
     map_report_export_allowed: bool = False
+
+    google_drive_client_id: str = ''
+    google_drive_client_secret: str = ''
+    google_drive_redirect_uri: str = ''
+    google_drive_token_key: str = ''
+
     soffice_path: str = 'soffice'
 
 

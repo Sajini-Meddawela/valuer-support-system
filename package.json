@@ -1,0 +1,13 @@
+{
+  "name": "valuer-support",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "frontend:install": "npm --prefix frontend ci",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "preview": "npm --prefix frontend run preview",
+    "firebase:serve": "npm run build && firebase emulators:start --only hosting",
+    "firebase:deploy": "npm run build && firebase deploy --only hosting"
+  }
+}
