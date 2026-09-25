@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: valuer-support-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+
+      - key: JWT_SECRET
+        sync: false
+
+      - key: GOOGLE_DRIVE_CLIENT_ID
+        sync: false
+
+      - key: GOOGLE_DRIVE_CLIENT_SECRET
+        sync: false
+
+      - key: GOOGLE_DRIVE_TOKEN_KEY
+        sync: false
+
+      # Add GOOGLE_DRIVE_REDIRECT_URI in the Render dashboard after the
+      # service receives its real https://....onrender.com URL.
+
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+
+      - key: GOOGLE_MAPS_SIGNING_SECRET
+        sync: false
+
+      - key: CORS_ORIGINS
+        value: '["https://valuer-support.web.app","https://valuer-support.firebaseapp.com"]'
+
+      - key: ALLOW_REGISTRATION
+        value: "true"
+
+      - key: MAP_REPORT_EXPORT_ALLOWED
+        value: "false"
+
+      - key: SOFFICE_PATH
+        value: /usr/bin/libreoffice

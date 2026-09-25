@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+import re
 import secrets
 
 import jwt
@@ -20,13 +21,14 @@ SCOPES = [DRIVE_SCOPE]
 TOKEN_URI = 'https://oauth2.googleapis.com/token'
 FOLDER_MIME_TYPE = 'application/vnd.google-apps.folder'
 
+REPORT_ID_PROPERTY = 'valuer_report_id'
+
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 UPLOAD_RETRIES = 5
 
 
 class DriveUploadError(RuntimeError):
     pass
-
 
 
 def check_configuration():
@@ -90,7 +92,13 @@ def read_oauth_state(state: str):
         settings.jwt_secret,
         algorithms=['HS256'],
         issuer='valuer-support-drive',
-        options={'require': ['sub', 'exp', 'iat']},
+        options={
+            'require': [
+                'sub',
+                'exp',
+                'iat',
+            ]
+        },
     )
 
     if payload.get('purpose') != 'google-drive-oauth':
@@ -163,6 +171,49 @@ def _escape_query_value(value: str):
     )
 
 
+def _clean_folder_label(value: str | None):
+    """
+    Keep the valuer's saved report reference recognisable in Drive while
+    removing control characters and collapsing accidental whitespace.
+    """
+    label = value or ''
+
+    label = ''.join(
+        ' ' if ord(character) < 32 or ord(character) == 127
+        else character
+        for character in label
+    )
+
+    label = re.sub(
+        r'\s+',
+        ' ',
+        label,
+    ).strip()
+
+    if not label:
+        label = 'Untitled assignment'
+
+    # Keep Drive names readable even if a user pastes an extremely long value.
+    return label[:120].rstrip()
+
+
+def report_folder_name(
+    report_id: str,
+    report_reference: str | None = None,
+):
+    reference = _clean_folder_label(
+        report_reference
+    )
+
+    short_id = (
+        report_id.split('-', 1)[0]
+        if report_id
+        else 'report'
+    )
+
+    return f'{reference} [{short_id}]'
+
+
 def create_root_folder(service):
     metadata = {
         'name': 'Valuer Support',
@@ -172,7 +223,9 @@ def create_root_folder(service):
     folder = service.files().create(
         body=metadata,
         fields='id',
-    ).execute()
+    ).execute(
+        num_retries=3
+    )
 
     return folder['id']
 
@@ -189,18 +242,57 @@ def create_drive_folder(
             'parents': [parent_folder_id],
         },
         fields='id',
-    ).execute()
+    ).execute(
+        num_retries=3
+    )
 
     return folder['id']
 
 
-def ensure_report_folder(
+def _find_report_folder_by_property(
     service,
     root_folder_id: str,
     report_id: str,
 ):
-    folder_name = f'Report {report_id}'
+    safe_root = _escape_query_value(
+        root_folder_id
+    )
+    safe_report_id = _escape_query_value(
+        report_id
+    )
 
+    query = (
+        f"'{safe_root}' in parents and "
+        f"mimeType = '{FOLDER_MIME_TYPE}' and "
+        f"appProperties has {{ "
+        f"key='{REPORT_ID_PROPERTY}' and "
+        f"value='{safe_report_id}' "
+        f"}} and "
+        "trashed = false"
+    )
+
+    result = service.files().list(
+        q=query,
+        spaces='drive',
+        fields='files(id,name)',
+        pageSize=1,
+    ).execute(
+        num_retries=3
+    )
+
+    files = result.get(
+        'files',
+        [],
+    )
+
+    return files[0] if files else None
+
+
+def _find_named_folder(
+    service,
+    root_folder_id: str,
+    folder_name: str,
+):
     safe_root = _escape_query_value(
         root_folder_id
     )
@@ -218,23 +310,166 @@ def ensure_report_folder(
     result = service.files().list(
         q=query,
         spaces='drive',
-        fields='files(id)',
+        fields='files(id,name)',
         pageSize=1,
-    ).execute()
+    ).execute(
+        num_retries=3
+    )
 
     files = result.get(
         'files',
         [],
     )
 
-    if files:
-        return files[0]['id']
+    return files[0] if files else None
 
-    return create_drive_folder(
+
+def _find_report_folder(
+    service,
+    root_folder_id: str,
+    report_id: str,
+    report_reference: str | None = None,
+):
+    # New folders are permanently linked to the database report ID through
+    # appProperties, so changing the visible reference never creates a new
+    # report folder.
+    folder = _find_report_folder_by_property(
         service,
         root_folder_id,
-        folder_name,
+        report_id,
     )
+
+    if folder:
+        return folder
+
+    # Step 8 used this legacy folder name. Detect it once, then upgrade it.
+    legacy_name = f'Report {report_id}'
+
+    folder = _find_named_folder(
+        service,
+        root_folder_id,
+        legacy_name,
+    )
+
+    if folder:
+        return folder
+
+    # Also recognise a readable folder created by this version before its
+    # appProperties metadata was successfully applied.
+    desired_name = report_folder_name(
+        report_id,
+        report_reference,
+    )
+
+    return _find_named_folder(
+        service,
+        root_folder_id,
+        desired_name,
+    )
+
+
+def _rename_and_tag_report_folder(
+    service,
+    folder_id: str,
+    report_id: str,
+    report_reference: str | None = None,
+):
+    desired_name = report_folder_name(
+        report_id,
+        report_reference,
+    )
+
+    updated = service.files().update(
+        fileId=folder_id,
+        body={
+            'name': desired_name,
+            'appProperties': {
+                REPORT_ID_PROPERTY: report_id,
+            },
+        },
+        fields='id,name',
+    ).execute(
+        num_retries=3
+    )
+
+    return updated['id']
+
+
+def sync_report_folder_name(
+    service,
+    root_folder_id: str,
+    report_id: str,
+    report_reference: str | None = None,
+):
+    """
+    Rename an already-existing report folder to match the current report
+    reference. Does not create a folder when the report has no Drive files yet.
+    """
+    folder = _find_report_folder(
+        service,
+        root_folder_id,
+        report_id,
+        report_reference,
+    )
+
+    if not folder:
+        return None
+
+    return _rename_and_tag_report_folder(
+        service,
+        folder['id'],
+        report_id,
+        report_reference,
+    )
+
+
+def ensure_report_folder(
+    service,
+    root_folder_id: str,
+    report_id: str,
+    report_reference: str | None = None,
+):
+    """
+    Return one stable Drive folder for a report.
+
+    Existing Step 8 folders named "Report <UUID>" are automatically renamed to
+    "<saved report reference> [short-id]" instead of creating duplicates.
+    """
+    folder = _find_report_folder(
+        service,
+        root_folder_id,
+        report_id,
+        report_reference,
+    )
+
+    if folder:
+        return _rename_and_tag_report_folder(
+            service,
+            folder['id'],
+            report_id,
+            report_reference,
+        )
+
+    desired_name = report_folder_name(
+        report_id,
+        report_reference,
+    )
+
+    created = service.files().create(
+        body={
+            'name': desired_name,
+            'mimeType': FOLDER_MIME_TYPE,
+            'parents': [root_folder_id],
+            'appProperties': {
+                REPORT_ID_PROPERTY: report_id,
+            },
+        },
+        fields='id',
+    ).execute(
+        num_retries=3
+    )
+
+    return created['id']
 
 
 def upload_bytes(
@@ -244,7 +479,10 @@ def upload_bytes(
     content: bytes,
     mimetype: str,
 ):
-    """Upload using resumable 1 MiB chunks with retries."""
+    """
+    Upload with resumable 1 MiB chunks and retries. This is important for
+    generated DOCX/PDF files on slower connections and small cloud instances.
+    """
     media = MediaIoBaseUpload(
         BytesIO(content),
         mimetype=mimetype,
@@ -268,6 +506,7 @@ def upload_bytes(
             _, response = request.next_chunk(
                 num_retries=UPLOAD_RETRIES
             )
+
     except Exception as exc:
         raise DriveUploadError(
             f'Google Drive upload failed for {filename}.'
@@ -319,7 +558,9 @@ def find_file_id(
         spaces='drive',
         fields='files(id)',
         pageSize=1,
-    ).execute()
+    ).execute(
+        num_retries=3
+    )
 
     files = result.get(
         'files',
@@ -350,7 +591,9 @@ def download_file_bytes(
     done = False
 
     while not done:
-        _, done = downloader.next_chunk(num_retries=3)
+        _, done = downloader.next_chunk(
+            num_retries=3
+        )
 
     return output.getvalue()
 
@@ -361,4 +604,6 @@ def delete_drive_file(
 ):
     service.files().delete(
         fileId=file_id
-    ).execute(num_retries=3)
+    ).execute(
+        num_retries=3
+    )

@@ -88,6 +88,8 @@ from .google_drive import (
 
     ensure_report_folder,
 
+    sync_report_folder_name,
+
     DriveUploadError,
 
     upload_bytes,
@@ -462,18 +464,85 @@ def delete_report(
     return Response(status_code=204)
 
 @app.put('/api/reports/{report_id}')
+def save_report(
+    report_id: str,
+    body: SaveReport,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    report = owned(
+        db,
+        report_id,
+        user,
+    )
 
-def save_report(report_id: str, body: SaveReport, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    editable(
+        report,
+        body.revision,
+    )
 
-    report = owned(db, report_id, user); editable(report, body.revision)
+    report.data = body.data.model_dump(
+        mode='json'
+    )
+    report.status = 'draft'
+    report.revision += 1
+    report.updated_at = now()
 
-    report.data = body.data.model_dump(mode='json')
+    log_event(
+        db,
+        report,
+        user,
+        'saved',
+    )
 
-    report.status = 'draft'; report.revision += 1; report.updated_at = now()
+    db.commit()
 
-    log_event(db, report, user, 'saved'); db.commit()
+    saved_result = result(report)
 
-    return result(report)
+    # If this report already has a Drive folder, keep its visible name in sync
+    # with the saved report reference. A Drive failure must never undo a
+    # successful report save, so this is intentionally best-effort.
+    connection = db.get(
+        DriveConnection,
+        user.id,
+    )
+
+    if (
+        connection
+        and connection.encrypted_refresh_token
+        and connection.root_folder_id
+    ):
+        encrypted_refresh_token = (
+            connection.encrypted_refresh_token
+        )
+        root_folder_id = (
+            connection.root_folder_id
+        )
+
+        # Release the Supabase connection before contacting Google Drive.
+        db.commit()
+
+        try:
+            service = drive_service(
+                decrypt_refresh_token(
+                    encrypted_refresh_token
+                )
+            )
+
+            sync_report_folder_name(
+                service,
+                root_folder_id,
+                report.id,
+                body.data.assignment.reference,
+            )
+
+        except Exception:
+            # The report itself is already safely saved in PostgreSQL.
+            # The folder will be renamed automatically on the next photo
+            # upload or finalisation attempt.
+            pass
+
+    return saved_result
 
 @app.post('/api/reports/{report_id}/calculate')
 
@@ -594,6 +663,7 @@ def finalise(
             service,
             root_folder_id,
             report_id,
+            data.assignment.reference,
         )
 
         final_folder_id = create_drive_folder(
@@ -919,6 +989,13 @@ async def upload_photo(
             service,
             connection.root_folder_id,
             report.id,
+            report.data.get(
+                'assignment',
+                {},
+            ).get(
+                'reference',
+                '',
+            ),
         )
 
         drive_filename = uid() + '.jpg'
@@ -1099,6 +1176,7 @@ def export(
     )
 
     encrypted_refresh_token = None
+    root_folder_id = None
 
     if report_status == 'final' or assets:
         connection = db.get(
@@ -1118,6 +1196,9 @@ def export(
 
         encrypted_refresh_token = (
             connection.encrypted_refresh_token
+        )
+        root_folder_id = (
+            connection.root_folder_id
         )
 
     # Do not hold a Supabase transaction open while downloading Drive
@@ -1148,6 +1229,24 @@ def export(
                 404,
                 'Final report files are unavailable.',
             )
+
+        # This also upgrades old Step 8 folders named "Report <UUID>".
+        # Folder-name sync is best-effort and must not block an export.
+        try:
+            sync_report_folder_name(
+                service,
+                root_folder_id,
+                report_id,
+                report_data.get(
+                    'assignment',
+                    {},
+                ).get(
+                    'reference',
+                    '',
+                ),
+            )
+        except Exception:
+            pass
 
         try:
             drive_file_id = find_file_id(
